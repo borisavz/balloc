@@ -17,24 +17,25 @@ typedef struct global_heap_t global_heap;
 void binit();
 void *balloc(size_t size);
 void *balloc_size_class(size_t size);
+used_superblock *get_block_parent(void *block_address);
 void *balloc_mmap(size_t size);
 int bfree(void *address);
 
 global_heap *heap;
+void *block_area_begin = NULL;
 
 struct free_superblock_t {
     free_superblock *next;
 };
 
 struct used_superblock_t {
-    int size_class;
+    int size_class_index;
     int high_water_mark;
     private_heap *owner;
 };
 
 struct free_block_t {
     free_block *next;
-    used_superblock *parent;
 };
 
 struct private_heap_t {
@@ -50,17 +51,21 @@ struct global_heap_t {
 void binit() {
     heap = sbrk(sizeof(global_heap));
 
-    int i;
-    for(i = 0; i < 4; i++) {
-        int j;
-        for(j = 0; j < 4; j++) {
+    for(int i = 0; i < 4; i++) {
+        for(int j = 0; j < 4; j++) {
             heap->private_heaps[i].free_list[j] = NULL;
         }
     }
 }
 
 void *alloc_superblock() {
-    return sbrk(sizeof(used_superblock) + 4096 * 16); /*why is 16 needed?*/
+    void *sb_addr = sbrk(sizeof(used_superblock) + 4096 * 16); /*why is 16 needed?*/
+
+    if(block_area_begin == NULL) {
+        block_area_begin = sb_addr;
+    }
+
+    return sb_addr;
 }
 
 void *balloc(size_t size) {
@@ -97,14 +102,13 @@ void *balloc_size_class(size_t size) {
 
     if(ph->free_list[size_class_index] == NULL) {
         used_superblock *sb = alloc_superblock();
-        sb->size_class = size_class;
+        printf("sb 1 %ld\n", sb);
+        sb->size_class_index = size_class_index;
         sb->owner = ph;
         sb->high_water_mark = 0;
 
         free_block *first_free = sb + sizeof(used_superblock);
-        /*first_free->next = first_free + size_class;*/
         first_free->next = NULL;
-        first_free->parent = sb;
 
         ph->free_list[size_class_index] = first_free;
     }
@@ -112,12 +116,13 @@ void *balloc_size_class(size_t size) {
     free_block *block = ph->free_list[size_class_index];
 
     if(block->next == NULL) {
-        block->parent->high_water_mark += size_class;
+        used_superblock *block_parent = get_block_parent(block);
+        printf("sb 2 %ld\n", block_parent);
+        block_parent->high_water_mark += size_class;
 
-        if(block->parent->high_water_mark < 4096) {
+        if(block_parent->high_water_mark < 4096) {
             free_block *next_free = block + size_class;
             next_free->next = NULL;
-            next_free->parent = block->parent;
 
             ph->free_list[size_class_index] = next_free;
         } else {
@@ -132,6 +137,14 @@ void *balloc_size_class(size_t size) {
     return block;
 }
 
+used_superblock *get_block_parent(void *block_address) {
+    void *addr_diff = (void *) block_address - (void *) block_area_begin;
+
+    long unsigned int sb_index = (long unsigned int) addr_diff / (sizeof(used_superblock) + 4096 * 16);
+
+    return block_area_begin + sb_index * (sizeof(used_superblock) + 4096 * 16);
+}
+
 void *balloc_mmap(size_t size) {
     /*TODO: implement*/
     return NULL;
@@ -139,27 +152,45 @@ void *balloc_mmap(size_t size) {
 
 int bfree(void *address) {
     /*TODO: find how to know if block is from sbrk or mmap*/
+    /*if heap is obtained using only sbrk, then range check is possible*/
+    
+    free_block *new_free = (free_block *) address;
+    used_superblock *sb = get_block_parent(address);
+
+    pthread_mutex_lock(&sb->owner->lock);
+
+    new_free->next = sb->owner->free_list[sb->size_class_index];
+    sb->owner->free_list[sb->size_class_index] = new_free;
+
+    pthread_mutex_unlock(&sb->owner->lock);
 }
 
 int main() {
     binit();
     printf("%ld %d %d\n", heap, sizeof(void *), sizeof(short));
     
-    int i;
-    for(i = 0; i < 1000000; i++) {
+    int *arr16[4][100000];
+
+    for(int i = 0; i < 100000; i++) {
         int *x;
         
-        x = balloc(16);
-        *x = 5;
+        arr16[0][i] = balloc(16);
+        *arr16[0][i] = 5;
+        
+        arr16[1][i] = balloc(32);
+        *arr16[1][i] = 5;
 
-        x = balloc(32);
-        *x = 5;
+        arr16[2][i] = balloc(64);
+        *arr16[2][i] = 5;
 
-        x = balloc(64);
-        *x = 5;
+        arr16[3][i] = balloc(128);
+        *arr16[3][i] = 5;
+    }
 
-        x = balloc(128);
-        *x = 5;
+    for(int i = 0; i < 4; i++) {
+        for(int j = 0; j < 100000; j++) {
+            bfree(arr16[i][j]);
+        }
     }
 
     return 0;
