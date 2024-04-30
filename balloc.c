@@ -5,9 +5,11 @@
 
 #define _GNU_SOURCE
 #include <unistd.h>
+#include <sys/mman.h>
 
 typedef void * void_pointer;
 
+typedef struct large_object_t large_object;
 typedef struct free_superblock_t free_superblock;
 typedef struct used_superblock_t used_superblock;
 typedef struct free_block_t free_block;
@@ -19,10 +21,17 @@ void *balloc(size_t size);
 void *balloc_size_class(size_t size);
 used_superblock *get_block_parent(void *block_address);
 void *balloc_mmap(size_t size);
-int bfree(void *address);
+void bfree(void *address);
+void bfree_superblock(void *address);
+void bfree_mmap(void *address);
 
 global_heap *heap;
 void *block_area_begin = NULL;
+void *block_area_end = NULL;
+
+struct large_object_t {
+    size_t size;
+};
 
 struct free_superblock_t {
     free_superblock *next;
@@ -59,10 +68,14 @@ void binit() {
 }
 
 void *alloc_superblock() {
-    void *sb_addr = sbrk(sizeof(used_superblock) + 4096 * 16); /*why is 16 needed?*/
+    int shift_size = sizeof(used_superblock) + 4096 * 16; /*why is 16 needed?*/
+    void *sb_addr = sbrk(shift_size);
 
     if(block_area_begin == NULL) {
         block_area_begin = sb_addr;
+        block_area_end = sb_addr + shift_size;
+    } else {
+        block_area_end += shift_size;
     }
 
     return sb_addr;
@@ -102,7 +115,6 @@ void *balloc_size_class(size_t size) {
 
     if(ph->free_list[size_class_index] == NULL) {
         used_superblock *sb = alloc_superblock();
-        printf("sb 1 %ld\n", sb);
         sb->size_class_index = size_class_index;
         sb->owner = ph;
         sb->high_water_mark = 0;
@@ -117,7 +129,6 @@ void *balloc_size_class(size_t size) {
 
     if(block->next == NULL) {
         used_superblock *block_parent = get_block_parent(block);
-        printf("sb 2 %ld\n", block_parent);
         block_parent->high_water_mark += size_class;
 
         if(block_parent->high_water_mark < 4096) {
@@ -146,14 +157,23 @@ used_superblock *get_block_parent(void *block_address) {
 }
 
 void *balloc_mmap(size_t size) {
-    /*TODO: implement*/
-    return NULL;
+    size_t total_size = sizeof(large_object) + size;
+    
+    large_object *obj = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    obj->size = sizeof(large_object);
+    
+    return obj + sizeof(large_object);
 }
 
-int bfree(void *address) {
-    /*TODO: find how to know if block is from sbrk or mmap*/
-    /*if heap is obtained using only sbrk, then range check is possible*/
-    
+void bfree(void *address) {
+    if(address >= block_area_begin && address <= block_area_end) {
+        bfree_superblock(address);
+    } else {
+        bfree_mmap(address);
+    }
+}
+
+void bfree_superblock(void *address) {
     free_block *new_free = (free_block *) address;
     used_superblock *sb = get_block_parent(address);
 
@@ -165,13 +185,26 @@ int bfree(void *address) {
     pthread_mutex_unlock(&sb->owner->lock);
 }
 
+void bfree_mmap(void *address) {
+    large_object *obj = address - sizeof(large_object);
+    munmap(obj, obj->size + sizeof(large_object));
+}
+
 int main() {
     binit();
-    printf("%ld %d %d\n", heap, sizeof(void *), sizeof(short));
     
-    int *arr16[4][100000];
+    int arr_len = 10000; /*too much mmaps are not possible, program fails*/
 
-    for(int i = 0; i < 100000; i++) {
+    int *arr16[5][arr_len];
+
+    /*arr16 = balloc(5 * sizeof(int **));
+
+    for(int i = 0; i < 5; i++) {
+        arr16[i] = balloc(arr_len * sizeof(int *));
+    }*/
+
+    printf("begin alloc\n");
+    for(int i = 0; i < arr_len; i++) {
         int *x;
         
         arr16[0][i] = balloc(16);
@@ -185,13 +218,21 @@ int main() {
 
         arr16[3][i] = balloc(128);
         *arr16[3][i] = 5;
+
+        arr16[4][i] = balloc(256);
+        *arr16[4][i] = 5;
     }
 
-    for(int i = 0; i < 4; i++) {
-        for(int j = 0; j < 100000; j++) {
+    printf("end alloc\n");
+    printf("begin free\n");
+
+    for(int i = 0; i < 5; i++) {
+        for(int j = 0; j < arr_len; j++) {
             bfree(arr16[i][j]);
         }
     }
+
+    printf("end free\n");
 
     return 0;
 }
